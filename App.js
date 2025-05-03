@@ -293,7 +293,9 @@ function App() {
               onEndReachedThreshold={0.1}
               ListFooterComponent={<LoadingFooter loading={loadingMore} />}
               ListEmptyComponent={
-                <Text style={styles.emptyText}>No products available</Text>
+                refreshing ? null : (
+                  <Text style={styles.emptyText}>No products available</Text>
+                )
               }
               refreshControl={
                 <RefreshControl
