@@ -11,6 +11,7 @@ import {
   ActivityIndicator,
   Dimensions,
   TouchableOpacity,
+  RefreshControl,
 } from 'react-native';
 import axios from 'axios';
 
@@ -21,12 +22,11 @@ const API_PARAMS = {
   categories: [],
   last_listing_id: '',
   last_row_value: '',
-  max: PRODUCTS_PER_PAGE.toString(),
+  max: '',
   min: '',
   search: '',
   sort: '',
-  token:
-    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJodHRwOi8vc2NoZW1hcy54bWxzb2FwLm9yZy93cy8yMDA1LzA1L2lkZW50aXR5L2NsYWltcy9uYW1laWRlbnRpZmllciI6IjEiLCJuYmYiOjE3NDYxOTI1MTQsImV4cCI6MTc0ODc4NDUxNCwiaXNzIjoiWHVyMzRQMSIsImF1ZCI6Ilh1cjQ0UFAifQ.QD-fcLXtznCfkTIYkbOQfc5fXfxYgw_mOziKWpUHddk',
+  token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJodHRwOi8vc2NoZW1hcy54bWxzb2FwLm9yZy93cy8yMDA1LzA1L2lkZW50aXR5L2NsYWltcy9uYW1laWRlbnRpZmllciI6IjEiLCJuYmYiOjE3NDYxOTI1MTQsImV4cCI6MTc0ODc4NDUxNCwiaXNzIjoiWHVyMzRQMSIsImF1ZCI6Ilh1cjQ0UFAifQ.QD-fcLXtznCfkTIYkbOQfc5fXfxYgw_mOziKWpUHddk',
   user_type: 'Xpert',
   version_number: '2.2.6',
 };
@@ -35,7 +35,7 @@ const numColumns = 2;
 const CARD_MARGIN = 12;
 const CARD_WIDTH = (Dimensions.get('window').width - CARD_MARGIN * 3) / numColumns;
 
-function ProductCard({item}) {
+const ProductCard = memo(({item}) => {
   return (
     <View style={styles.card}>
       <Image
@@ -53,9 +53,9 @@ function ProductCard({item}) {
       <Text style={styles.brand}>{item.brand}</Text>
     </View>
   );
-}
+});
 
-function LoadingFooter({loading}) {
+const LoadingFooter = memo(({loading}) => {
   if (!loading) return null;
   
   return (
@@ -64,13 +64,13 @@ function LoadingFooter({loading}) {
       <Text style={styles.loadingText}>Loading more products...</Text>
     </View>
   );
-}
+});
 
-const BottomTabBar = () => {
+const BottomTabBar = memo(() => {
   const isDarkMode = useColorScheme() === 'dark';
   const [activeTab, setActiveTab] = useState('home');
 
-  const TabButton = ({icon, label, isActive, onPress}) => (
+  const TabButton = memo(({icon, label, isActive, onPress}) => (
     <TouchableOpacity 
       style={[
         styles.tabButton,
@@ -91,7 +91,7 @@ const BottomTabBar = () => {
         {label}
       </Text>
     </TouchableOpacity>
-  );
+  ));
 
   return (
     <View style={[
@@ -124,9 +124,9 @@ const BottomTabBar = () => {
       />
     </View>
   );
-};
+});
 
-const Header = () => {
+const Header = memo(() => {
   const isDarkMode = useColorScheme() === 'dark';
   return (
     <View style={styles.headerContainer}>
@@ -138,24 +138,31 @@ const Header = () => {
       </Text>
     </View>
   );
-};
+});
 
 function App() {
   const isDarkMode = useColorScheme() === 'dark';
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [lastListingId, setLastListingId] = useState('');
   const [hasMore, setHasMore] = useState(true);
+  const [error, setError] = useState(null);
 
   const fetchProducts = async (lastId = '') => {
     try {
+      // If this is the first load (no lastId provided), we want to start with a high value
+      // to get the most recent products. Otherwise, use the provided lastId for pagination.
+      const effectiveLastId = lastId || '1017'; // Use a high initial listing_id
+      
       const params = {
         ...API_PARAMS,
-        last_listing_id: lastId,
+        last_listing_id: effectiveLastId,
+
       };
 
-      console.log('Making API call with lastId:', lastId);
+      console.log('Making API call with lastId:', effectiveLastId);
       const response = await axios.post(PRODUCT_API, params, {
         headers: {
           'Content-Type': 'application/json',
@@ -167,25 +174,61 @@ function App() {
         const newProducts = response.data.xchange;
         console.log('Received products:', newProducts.length);
         
-        if (newProducts.length < PRODUCTS_PER_PAGE) {
+        if (newProducts.length === 0) {
           setHasMore(false);
+          console.log('No more products available');
+          return;
         }
         
+        // For subsequent requests, add to existing products
         if (lastId) {
-          setProducts(prev => [...prev, ...newProducts]);
+          setProducts(prev => {
+            // Create a Set of existing IDs for efficient lookup
+            const existingIds = new Set(prev.map(p => p.listing_id));
+            
+            // Filter out duplicates
+            const uniqueNewProducts = newProducts.filter(p => !existingIds.has(p.listing_id));
+            console.log(`Adding ${uniqueNewProducts.length} unique products to existing ${prev.length}`);
+            
+            if (uniqueNewProducts.length === 0) {
+              setHasMore(false);
+              console.log('No more unique products available');
+              return prev;
+            }
+            
+            // Find all listing IDs and sort them to find the smallest for next pagination
+            const productIds = uniqueNewProducts.map(p => parseInt(p.listing_id));
+            const minId = Math.min(...productIds);
+            console.log(`Smallest ID in batch: ${minId}`);
+            
+            // Set next pagination point to the smallest ID we've seen
+            // The API will return products with IDs < this value
+            setLastListingId(minId.toString());
+            console.log(`Setting next pagination point to: ${minId}`);
+            
+            return [...prev, ...uniqueNewProducts];
+          });
         } else {
+          // First-time load
           setProducts(newProducts);
-        }
-        
-        if (newProducts.length > 0) {
-          setLastListingId(newProducts[newProducts.length - 1].listing_id.toString());
+          
+          // Find the smallest ID for pagination
+          const productIds = newProducts.map(p => parseInt(p.listing_id));
+          const minId = Math.min(...productIds);
+          console.log(`Initial batch smallest ID: ${minId}`);
+          
+          // The API returns products with IDs < last_listing_id
+          setLastListingId(minId.toString());
+          console.log(`Setting next pagination point to: ${minId}`);
         }
       }
     } catch (e) {
       console.error('API Error:', e.message);
+      setError('Failed to load products. Please try again.');
     } finally {
       setLoading(false);
       setLoadingMore(false);
+      setRefreshing(false);
     }
   };
 
@@ -193,12 +236,20 @@ function App() {
     fetchProducts();
   }, []);
 
-  const handleLoadMore = () => {
-    if (loadingMore || !hasMore || loading) return;
-    
-    setLoadingMore(true);
-    fetchProducts(lastListingId);
-  };
+  const onRefresh = useCallback(() => {
+    setRefreshing(true);
+    setProducts([]);
+    setLastListingId('');
+    setHasMore(true);
+    fetchProducts('', true);
+  }, []);
+
+  const handleLoadMore = useCallback(() => {
+    if (!loading && !loadingMore && hasMore && lastListingId) {
+      setLoadingMore(true);
+      fetchProducts(lastListingId);
+    }
+  }, [loading, loadingMore, hasMore, lastListingId]);
 
   const backgroundStyle = {
     backgroundColor: isDarkMode ? '#181818' : '#f5f5f5',
@@ -210,7 +261,7 @@ function App() {
   const getItemLayout = useCallback((data, index) => (
     {length: CARD_WIDTH + CARD_MARGIN, offset: (CARD_WIDTH + CARD_MARGIN) * index, index}
   ), []);
-  
+
   return (
     <SafeAreaView style={backgroundStyle}>
       <StatusBar
@@ -220,7 +271,14 @@ function App() {
       <View style={{flex: 1}}>
         <Header />
         <View style={{flex: 1, paddingHorizontal: CARD_MARGIN, paddingTop: 16}}>
-          {loading ? (
+          {error ? (
+            <View style={styles.errorContainer}>
+              <Text style={styles.errorText}>{error}</Text>
+              <TouchableOpacity onPress={() => fetchProducts()} style={styles.retryButton}>
+                <Text style={styles.retryButtonText}>Retry</Text>
+              </TouchableOpacity>
+            </View>
+          ) : loading && !refreshing ? (
             <ActivityIndicator size="large" color="#007AFF" style={{marginTop: 40}} />
           ) : (
             <FlatList
@@ -232,10 +290,16 @@ function App() {
               contentContainerStyle={{paddingBottom: 80}}
               showsVerticalScrollIndicator={false}
               onEndReached={handleLoadMore}
-              onEndReachedThreshold={0.5}
+              onEndReachedThreshold={0.1}
               ListFooterComponent={<LoadingFooter loading={loadingMore} />}
               ListEmptyComponent={
                 <Text style={styles.emptyText}>No products available</Text>
+              }
+              refreshControl={
+                <RefreshControl
+                  refreshing={refreshing}
+                  onRefresh={onRefresh}
+                />
               }
               getItemLayout={getItemLayout}
               windowSize={5}
@@ -393,6 +457,28 @@ const styles = StyleSheet.create({
   tabLabelActive: {
     color: '#007AFF',
     fontWeight: '600',
+  },
+  errorContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  errorText: {
+    color: '#ff3333',
+    fontSize: 16,
+    marginBottom: 20,
+    textAlign: 'center',
+  },
+  retryButton: {
+    backgroundColor: '#007AFF',
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 5,
+  },
+  retryButtonText: {
+    color: 'white',
+    fontWeight: 'bold',
   },
 });
 
